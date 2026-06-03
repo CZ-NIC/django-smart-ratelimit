@@ -227,6 +227,7 @@ class RedisBackend(BaseBackend):
             "socket_timeout": 5,
             "socket_connect_timeout": 5,
             "decode_responses": True,
+            "is_cluster": False,
             **redis_config,
         }
 
@@ -235,8 +236,9 @@ class RedisBackend(BaseBackend):
 
         try:
             # Get or create connection pool
-            self._pool = self._get_or_create_pool(url, **self.config)
-            self.redis = redis.Redis(connection_pool=self._pool)
+            clean_config = {k: v for k, v in self.config.items() if k not in ["is_cluster"]}
+            self._pool = self._get_or_create_pool(url, **clean_config)
+            self._init_redis_client()
 
             # Initial verification
             self._check_connection(raise_exception=True)
@@ -278,6 +280,16 @@ class RedisBackend(BaseBackend):
             f"Redis backend initialized with {self.algorithm} algorithm",
             level="info",
         )
+
+    def _init_redis_client(self):
+        if self.config["is_cluster"]:
+            if "startup_nodes" in self.config:
+                self.redis = redis.RedisCluster(startup_nodes=self.config["startup_nodes"], connection_pool=self._pool)
+            else:
+                self.redis = redis.RedisCluster(host=self.config["host"], port=self.config["port"],
+                                                connection_pool=self._pool)
+        else:
+            self.redis = redis.Redis(connection_pool=self._pool)
 
     @classmethod
     def _get_or_create_pool(cls, url: Optional[str], **kwargs: Any) -> Any:
@@ -322,7 +334,7 @@ class RedisBackend(BaseBackend):
                 self._pool.disconnect()  # Reset connections
             # Redis client automatically uses the pool, so resetting pool is enough?
             # Or create new client?
-            self.redis = redis.Redis(connection_pool=self._pool)
+            self._init_redis_client()
         except Exception:
             # log but don't crash
             pass  # nosec B110 - intentional resilient error handling
@@ -919,6 +931,7 @@ class AsyncRedisBackend(BaseBackend):
             "db": 0,
             "password": None,  # nosec B105 - config key default, not a secret
             "decode_responses": True,
+            "is_cluster": False,
             **redis_config,
         }
 
@@ -992,13 +1005,16 @@ class AsyncRedisBackend(BaseBackend):
             clean_config = {
                 k: v
                 for k, v in self.config.items()
-                if k not in ["algorithm", "key_prefix"]
+                if k not in ["algorithm", "key_prefix", "is_cluster"]
             }
 
             if self.url:
                 self.client = aioredis.from_url(self.url, **clean_config)
             else:
-                self.client = aioredis.Redis(**clean_config)
+                if self.config["is_cluster"]:
+                    self.client = aioredis.RedisCluster(**clean_config)
+                else:
+                    self.client = aioredis.Redis(**clean_config)
 
             # Load scripts
             try:
